@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Editable JSON Table Viewer</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #181a1b; color: #fff; }
+    .drop-area {
+      border: 2px dashed #4CAF50;
+      border-radius: 10px;
+      padding: 40px;
+      text-align: center;
+      margin: 40px auto 20px auto;
+      background: #222;
+      max-width: 600px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .drop-area.dragover { background: #333; }
+    table { border-collapse: collapse; margin: 20px auto; width: 95%; background: #222; }
+    th, td { border: 1px solid #444; padding: 8px; text-align: left; }
+    th { background: #333; }
+    td[contenteditable="true"] { background: #292d33; outline: 1px solid #4CAF50; min-width: 60px; }
+    tr.invalid-row td { background: #8B0000 !important; color: #fff; }
+    .download-btn, .add-btn, .undo-btn {
+      display: inline-block;
+      margin: 20px 10px 0 10px;
+      padding: 10px 25px;
+      background: #4CAF50;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1em;
+      cursor: pointer;
+      text-align: center;
+      transition: background 0.2s;
+    }
+    .download-btn:disabled, .undo-btn:disabled {
+      background: #666;
+      cursor: not-allowed;
+      color: #aaa;
+    }
+    .download-btn:hover:not(:disabled), .add-btn:hover, .undo-btn:hover:not(:disabled) { background: #357a38; }
+    .del-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 1.15em;
+      color: #FF4136;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    .del-btn:hover { color: #ff867f; }
+    #edit-warning { text-align:center; color:#FFEB3B; font-size:1em; margin-top:10px;}
+    #error-warning { text-align:center; color:#FF4136; font-size:1.1em; margin-top:12px; margin-bottom:0; }
+    #button-container, #add-row-container, #undo-row-container {text-align:center;}
+  </style>
+</head>
+<body>
+  <div class="drop-area" id="drop-area">
+    <h2>Drag & Drop your JSON file here</h2>
+    <p>(Or click to select)</p>
+    <input type="file" id="fileElem" accept=".json" style="display:none">
+  </div>
+  <div id="edit-warning" style="display:none;">
+    <strong>Click a cell to edit.</strong>
+    Arrays (SpawnAttachments, Variants) are comma-separated lists.
+  </div>
+  <div id="error-warning" style="display:none;"></div>
+  <div id="table-container"></div>
+  <div id="add-row-container" style="display:none;">
+    <button id="add-row-btn" class="add-btn">Add Row</button>
+  </div>
+  <div id="undo-row-container" style="display:none;">
+    <button id="undo-row-btn" class="undo-btn" disabled>Undo</button>
+  </div>
+  <div id="button-container" style="display:none;">
+    <button id="download-csv" class="download-btn">Download CSV</button>
+    <button id="download-json" class="download-btn">Download JSON</button>
+  </div>
+  <script>
+    const dropArea = document.getElementById('drop-area');
+    const fileElem = document.getElementById('fileElem');
+    const tableContainer = document.getElementById('table-container');
+    const downloadBtn = document.getElementById('download-csv');
+    const downloadJsonBtn = document.getElementById('download-json');
+    const editWarning = document.getElementById('edit-warning');
+    const errorWarning = document.getElementById('error-warning');
+    const buttonContainer = document.getElementById('button-container');
+    const addRowContainer = document.getElementById('add-row-container');
+    const addRowBtn = document.getElementById('add-row-btn');
+    const undoRowContainer = document.getElementById('undo-row-container');
+    const undoRowBtn = document.getElementById('undo-row-btn');
+    let lastTableData = [];
+    let lastHeaders = [];
+    let originalJson = null;
+    let originalFileName = "export.json";
+    let undoStack = null; // { data: ..., type: 'add'|'delete', row:..., index:... }
+
+    dropArea.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropArea.classList.add('dragover');
+    });
+    dropArea.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      dropArea.classList.remove('dragover');
+    });
+    dropArea.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropArea.classList.remove('dragover');
+      handleFiles(e.dataTransfer.files);
+    });
+    dropArea.addEventListener('click', () => fileElem.click());
+    fileElem.addEventListener('change', () => handleFiles(fileElem.files));
+
+    function handleFiles(files) {
+      if (!files.length) return;
+      const file = files[0];
+      originalFileName = file.name || "export.json";
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const json = JSON.parse(e.target.result);
+          originalJson = JSON.parse(e.target.result);
+          displayTableFromJSON(json);
+        } catch (err) {
+          alert("Invalid JSON file.");
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function displayTableFromJSON(json) {
+      let items = json.Items || [];
+      if (!Array.isArray(items) || !items.length) {
+        tableContainer.innerHTML = "<p style='color: #FF4136'>No 'Items' array found or it's empty.</p>";
+        buttonContainer.style.display = 'none';
+        editWarning.style.display = 'none';
+        errorWarning.style.display = 'none';
+        addRowContainer.style.display = 'none';
+        undoRowContainer.style.display = 'none';
+        return;
+      }
+
+      lastHeaders = Object.keys(items[0]);
+      lastTableData = items.map(row => ({
+        ...row,
+        SpawnAttachments: Array.isArray(row.SpawnAttachments) ? row.SpawnAttachments.join(', ') : "",
+        Variants: Array.isArray(row.Variants) ? row.Variants.join(', ') : ""
+      }));
+
+      buildEditableTable();
+      buttonContainer.style.display = '';
+      editWarning.style.display = '';
+      addRowContainer.style.display = '';
+      undoRowContainer.style.display = '';
+      undoRowBtn.disabled = true;
+      undoStack = null;
+      validateTable();
+    }
+
+    function buildEditableTable() {
+      let html = `<table id="editable-table"><thead><tr>`;
+      lastHeaders.forEach(h => html += `<th>${h}</th>`);
+      html += `<th></th></tr></thead><tbody>`;
+      lastTableData.forEach((row, rowIdx) => {
+        html += `<tr>`;
+        lastHeaders.forEach(h => {
+          html += `<td contenteditable="true" data-row="${rowIdx}" data-col="${h}">${escapeHtml(row[h])}</td>`;
+        });
+        html += `<td><button class="del-btn" title="Delete row" data-del="${rowIdx}">🗑️</button></td>`;
+        html += `</tr>`;
+      });
+      html += `</tbody></table>`;
+      tableContainer.innerHTML = html;
+
+      // Editing
+      document.querySelectorAll('td[contenteditable="true"]').forEach(td => {
+        td.addEventListener('input', function () {
+          const row = parseInt(this.dataset.row);
+          const col = this.dataset.col;
+          lastTableData[row][col] = this.innerText;
+          validateTable();
+        });
+      });
+
+      // Deleting
+      document.querySelectorAll('button.del-btn').forEach(btn => {
+        btn.onclick = function () {
+          const idx = parseInt(btn.getAttribute('data-del'));
+          // Save undo stack before deleting
+          undoStack = {
+            data: JSON.parse(JSON.stringify(lastTableData)),
+            type: "delete",
+            row: JSON.parse(JSON.stringify(lastTableData[idx])),
+            index: idx
+          };
+          undoRowBtn.disabled = false;
+          lastTableData.splice(idx, 1);
+          buildEditableTable();
+        };
+      });
+
+      validateTable();
+    }
+
+    addRowBtn.onclick = function () {
+      const newRow = {};
+      lastHeaders.forEach(h => {
+        if (["MaxPriceThreshold","MinPriceThreshold","SellPricePercent","MaxStockThreshold","MinStockThreshold","QuantityPercent"].includes(h)) {
+          newRow[h] = "0";
+        } else if (["SpawnAttachments","Variants"].includes(h)) {
+          newRow[h] = "";
+        } else {
+          newRow[h] = "";
+        }
+      });
+      // Save undo stack before adding
+      undoStack = {
+        data: JSON.parse(JSON.stringify(lastTableData)),
+        type: "add",
+        index: lastTableData.length
+      };
+      undoRowBtn.disabled = false;
+      lastTableData.push(newRow);
+      buildEditableTable();
+    };
+
+    undoRowBtn.onclick = function () {
+      if (!undoStack) return;
+      // Undo add: just pop the last row
+      if (undoStack.type === "add") {
+        lastTableData = JSON.parse(JSON.stringify(undoStack.data));
+      }
+      // Undo delete: restore previous data, or specifically insert the row back at right index
+      else if (undoStack.type === "delete") {
+        lastTableData = JSON.parse(JSON.stringify(undoStack.data));
+      }
+      buildEditableTable();
+      undoRowBtn.disabled = true;
+      undoStack = null;
+    };
+
+    function validateRow(row) {
+      let min = Number(row.MinPriceThreshold), max = Number(row.MaxPriceThreshold);
+      if (isNaN(min) || isNaN(max)) return false;
+      return max > min;
+    }
+
+    function validateTable() {
+      let invalidRows = [];
+      lastTableData.forEach((row, i) => {
+        let min = Number(row.MinPriceThreshold), max = Number(row.MaxPriceThreshold);
+        if (isNaN(min) || isNaN(max) || max <= min) invalidRows.push(i + 1);
+      });
+
+      document.querySelectorAll('#editable-table tbody tr').forEach((tr, rowIdx) => {
+        if (!validateRow(lastTableData[rowIdx])) {
+          tr.classList.add('invalid-row');
+        } else {
+          tr.classList.remove('invalid-row');
+        }
+      });
+
+      if (invalidRows.length) {
+        errorWarning.style.display = '';
+        errorWarning.innerHTML =
+          `❌ <strong>Error:</strong> <br>MaxPriceThreshold must be <u>greater</u> than MinPriceThreshold for row(s): <b>${invalidRows.join(', ')}</b>. <br>Please correct before exporting.`;
+        downloadBtn.disabled = true;
+        downloadJsonBtn.disabled = true;
+      } else {
+        errorWarning.style.display = 'none';
+        downloadBtn.disabled = false;
+        downloadJsonBtn.disabled = false;
+      }
+    }
+
+    function promptForFilename(defaultName, suggestedExt) {
+      let useOriginal = confirm(`Would you like to use the original filename?\n\n"${defaultName}"\n\nPress "OK" to use it, or "Cancel" to enter a new filename.`);
+      if (useOriginal) return defaultName;
+      let base = defaultName.replace(/\.[^/.]+$/, "");
+      let ext = suggestedExt || defaultName.split('.').pop() || "";
+      let newName = prompt("Enter a filename:", base + "." + ext);
+      if (!newName) newName = "export." + ext;
+      if (!newName.endsWith("." + ext)) newName += "." + ext;
+      return newName;
+    }
+
+    downloadBtn.onclick = function () {
+      if (!lastTableData.length || downloadBtn.disabled) return;
+      const headers = lastHeaders;
+      const rows = [headers, ...lastTableData.map(row => headers.map(h => row[h]))];
+      const csv = rows.map(row =>
+        row.map(val => {
+          val = (val ?? '').toString();
+          return val.includes(',') ? `"${val.replace(/"/g, '""')}"` : val;
+        }).join(',')
+      ).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      let csvName = promptForFilename(originalFileName.replace(/\.json$/i, '.csv'), "csv");
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = csvName;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 0);
+    };
+
+    downloadJsonBtn.onclick = function () {
+      if (!originalJson || !lastTableData.length || downloadJsonBtn.disabled) return;
+      let exportJson = JSON.parse(JSON.stringify(originalJson));
+      exportJson.Items = lastTableData.map(row => {
+        let newRow = {...row};
+        newRow.SpawnAttachments = (typeof newRow.SpawnAttachments === 'string' && newRow.SpawnAttachments.trim().length)
+          ? newRow.SpawnAttachments.split(',').map(x=>x.trim()).filter(x=>x.length)
+          : [];
+        newRow.Variants = (typeof newRow.Variants === 'string' && newRow.Variants.trim().length)
+          ? newRow.Variants.split(',').map(x=>x.trim()).filter(x=>x.length)
+          : [];
+        ["MaxPriceThreshold","MinPriceThreshold","SellPricePercent","MaxStockThreshold","MinStockThreshold","QuantityPercent"].forEach(key=>{
+          if(newRow.hasOwnProperty(key)){
+            let num = Number(newRow[key]);
+            newRow[key] = isNaN(num) ? newRow[key] : num;
+          }
+        });
+        return newRow;
+      });
+      const jsonString = JSON.stringify(exportJson, null, 2);
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      let jsonName = promptForFilename(originalFileName.replace(/\.csv$/i, '.json'), "json");
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = jsonName;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 0);
+    };
+
+    function escapeHtml(text) {
+      if (typeof text !== "string") return text;
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>
